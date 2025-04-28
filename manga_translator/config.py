@@ -86,6 +86,7 @@ class Detector(str, Enum):
     ctd = "ctd"
     craft = "craft"
     paddle = "paddle"
+    gemini = "gemini"
     none = "none"
 
 class Inpainter(str, Enum):
@@ -271,6 +272,8 @@ class DetectorConfig(BaseModel):
     """Threshold for bbox generation"""
     unclip_ratio: float = 2.3
     """How much to extend text skeleton to form bounding box"""
+    gemini_model: str = "gemini-2.0-flash-001"
+    """Which Gemini model to use when detector is set to 'gemini'"""
 
 class InpainterConfig(BaseModel):
     inpainter: Inpainter = Inpainter.lama_large
