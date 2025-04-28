@@ -234,9 +234,10 @@ class MangaTranslator:
         # -- Detection
         await self._report_progress('detection')
         try:
+            # Pass the entire detector config object now
             ctx.textlines, ctx.mask_raw, ctx.mask = await self._run_detection(config, ctx)
-        except Exception as e:  
-            logger.error(f"Error during detection:\n{traceback.format_exc()}")  
+        except Exception as e:
+            logger.error(f"Error during detection:\n{traceback.format_exc()}")
             if not self.ignore_errors:  
                 raise 
             ctx.textlines = [] 
@@ -258,37 +259,49 @@ class MangaTranslator:
                 cv2.polylines(img_bbox_raw, [txtln.pts], True, color=(255, 0, 0), thickness=2)
             cv2.imwrite(self._result_path('bboxes_unfiltered.png'), cv2.cvtColor(img_bbox_raw, cv2.COLOR_RGB2BGR))
 
-        # -- OCR
-        await self._report_progress('ocr')
-        try:
-            ctx.textlines = await self._run_ocr(config, ctx)
-        except Exception as e:  
-            logger.error(f"Error during ocr:\n{traceback.format_exc()}")  
-            if not self.ignore_errors:  
-                raise 
-            ctx.textlines = [] # Fallback to empty textlines if OCR fails
+        # -- OCR (Conditional)
+        # Skip OCR if Gemini detector is used, as it performs OCR internally
+        if config.detector.detector != Detector.gemini:
+            await self._report_progress('ocr')
+            try:
+                ctx.textlines = await self._run_ocr(config, ctx)
+            except Exception as e:
+                logger.error(f"Error during ocr:\n{traceback.format_exc()}")
+                if not self.ignore_errors:
+                    raise
+                ctx.textlines = [] # Fallback to empty textlines if OCR fails
 
-        if not ctx.textlines:
-            await self._report_progress('skip-no-text', True)
-            # If no text was found result is intermediate image product
-            ctx.result = ctx.upscaled
-            return await self._revert_upscale(config, ctx)
-
-        # Apply pre-dictionary after OCR
-        pre_dict = load_dictionary(self.pre_dict)
-        pre_replacements = []
-        for textline in ctx.textlines:
-            original = textline.text
-            textline.text = apply_dictionary(textline.text, pre_dict)
-            if original != textline.text:
-                pre_replacements.append(f"{original} => {textline.text}")
-
-        if pre_replacements:
-            logger.info("Pre-translation replacements:")
-            for replacement in pre_replacements:
-                logger.info(replacement)
+            if not ctx.textlines:
+                await self._report_progress('skip-no-text', True)
+                # If no text was found result is intermediate image product
+                ctx.result = ctx.upscaled
+                return await self._revert_upscale(config, ctx)
         else:
-            logger.info("No pre-translation replacements made.")
+             logger.info("Skipping separate OCR step as Gemini detector includes OCR.")
+             # Check if Gemini detector returned any textlines
+             if not ctx.textlines:
+                 await self._report_progress('skip-no-text', True) # Use same progress report?
+                 ctx.result = ctx.upscaled
+                 return await self._revert_upscale(config, ctx)
+
+
+        # Apply pre-dictionary (runs after detection+OCR or just detection if Gemini)
+        if self.pre_dict:
+            pre_dict = load_dictionary(self.pre_dict)
+            if pre_dict: # Only log if dictionary is not empty
+                pre_replacements = []
+                for textline in ctx.textlines:
+                    original = textline.text
+                    textline.text = apply_dictionary(textline.text, pre_dict)
+                    if original != textline.text:
+                        pre_replacements.append(f"{original} => {textline.text}")
+
+                if pre_replacements:
+                    logger.info("Pre-translation replacements:")
+                    for replacement in pre_replacements:
+                        logger.info(replacement)
+                else:
+                    logger.info("No pre-translation replacements made.")
 
         # -- Textline merge
         await self._report_progress('textline_merge')
@@ -401,11 +414,14 @@ class MangaTranslator:
     async def _run_detection(self, config: Config, ctx: Context):
         current_time = time.time()
         self._model_usage_timestamps[("detection", config.detector.detector)] = current_time
-        return await dispatch_detection(config.detector.detector, ctx.img_rgb, config.detector.detection_size, config.detector.text_threshold,
-                                        config.detector.box_threshold,
-                                        config.detector.unclip_ratio, config.detector.det_invert, config.detector.det_gamma_correct, config.detector.det_rotate,
-                                        config.detector.det_auto_rotate,
-                                        self.device, self.verbose)
+        # Pass the whole detector config object to the dispatcher
+        return await dispatch_detection(
+            detector_key=config.detector.detector,
+            image=ctx.img_rgb,
+            config=config.detector, # Pass the DetectorConfig object
+            device=self.device,
+            verbose=self.verbose
+        )
 
     async def _unload_model(self, tool: str, model: str):
         logger.info(f"Unloading {tool} model: {model}")
